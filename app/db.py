@@ -3,8 +3,10 @@ Created on Aug 28, 2021
 
 @author: warno006089
 '''
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, Column, Integer, select, Sequence
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm.interfaces import ONETOMANY, MANYTOONE, MANYTOMANY
+from sqlalchemy.exc import SQLAlchemyError
 try:
     from sqlalchemy import inspect
     from sqlalchemy.orm.state import InstanceState
@@ -12,106 +14,154 @@ except ImportError as e:
     def __nomodule(*args, **kwargs): raise e
     inspect = __nomodule
     InstanceState = __nomodule
-from app.dgbz import config
+from .config import config
+from .filters import build_filters
 
 db_engine = create_engine(config['config']['db_uri'], echo=True, future=True)
 db_session = sessionmaker(db_engine)
 
 class JsonSerializableBase(object):
-    """ Declarative Base mixin to allow objects serialization
-
-        Defines interfaces utilized by :cls:ApiJSONEncoder
-
-        In particular, it defines the __json__() method that converts the
-        SQLAlchemy model to a dictionary. It iterates over model fields
-        (DB columns and relationships) and collects them in the dictionary.
-
-        The important aspect here is that it collects only loaded attributes.
-        For example, all relationships are lazy-loaded by default, so they will
-        not be present in the output JSON unless you use eager loading.
-        So if you want to include nested objects into the JSON output, then
-        you should use eager loading.
-
-        Beside the __json__() method, this base defines two properties:
-          _json_include = []
-          _json_exclude = []
-
-        They both are needed to customize this loaded-only-fields serialization.
-
-          - _json_include is the list of strings (DB columns and relationship
-           names) that should be present in JSON, even if they are not loaded.
-           Useful for hybrid properties and relationships that cannot be loaded
-           eagerly. Just put their names to the _json_include list.
-
-          - _json_exclude is the black-list that actually removes fields from
-            the output JSON representation. It is applied last, so it beats all
-            other things like _json_include.
-            Useful for hiding sensitive data, like password hashes stored in DB.
-    """
 
     _json_include = []
     _json_exclude = []
-    _session = db_session
 
     def __json__(self, excluded_keys=set()):
         ins = inspect(self)
-
+        
         columns = set(ins.mapper.column_attrs.keys())
         relationships = set(ins.mapper.relationships.keys())
         unloaded = ins.unloaded
         expired = ins.expired_attributes
         include = set(self._json_include)
         exclude = set(self._json_exclude) | excluded_keys
-
-        # This set of keys determines which fields will be present in
-        # the resulting JSON object.
-        # Here we initialize it with properties defined by the model class,
-        # and then add/delete some columns below in a tricky way.
         keys = columns | relationships
-
-
-        # 1. Remove not yet loaded properties.
-        # Basically this is needed to serialize only .join()'ed relationships
-        # and omit all other lazy-loaded things.
         if not ins.transient:
-            # If the entity is not transient -- exclude unloaded keys
-            # Transient entities won't load these anyway, so it's safe to
-            # include all columns and get defaults
             keys -= unloaded
-
-        # 2. Re-load expired attributes.
-        # At the previous step (1) we substracted unloaded keys, and usually
-        # that includes all expired keys. Actually we don't want to remove the
-        # expired keys, we want to refresh them, so here we have to re-add them
-        # back. And they will be refreshed later, upon first read.
         if ins.expired:
             keys |= expired
-
-        # 3. Add keys explicitly specified in _json_include list.
-        # That allows you to override those attributes unloaded above.
-        # For example, you may include some lazy-loaded relationship() there
-        # (which is usually removed at the step 1).
         keys |= include
-
-        # 4. For objects in `deleted` or `detached` state, remove all
-        # relationships and lazy-loaded attributes, because they require
-        # refreshing data from the DB, but this cannot be done in these states.
-        # That is:
-        #  - if the object is deleted, you can't refresh data from the DB
-        #    because there is no data in the DB, everything is deleted
-        #  - if the object is detached, then there is no DB session associated
-        #    with the object, so you don't have a DB connection to send a query
-        # So in both cases you get an error if you try to read such attributes.
         """ if ins.deleted or ins.detached:
             keys -= relationships
             keys -= unloaded """
-
-        # 5. Delete all explicitly black-listed keys.
-        # That should be done last, since that may be used to hide some
-        # sensitive data from JSON representation.
         keys -= exclude
-
         return { key: getattr(self, key)  for key in keys }
+    
+    def _constructor(self, **kwargs):
+        columns = self._get_member()[0]
+        for key, val in kwargs.items():
+            if key in columns:
+                setattr(self, key, val)
+    
+    @classmethod
+    def create(cls, env, **kwargs):
+        obj = cls(**kwargs)
+        with db_session() as session:
+            obj.init_env(env, session)
+            obj.on_create(**kwargs)
+            session.add(obj)
+            obj.after_create(**kwargs)
+            try:
+                session.commit()
+            except SQLAlchemyError as e:
+                raise e
+            return obj.id
+        
+    @classmethod
+    def write(cls, env, *args, **kwargs):
+        query = cls._query_get_single(cls, 'id', args['id'])
+        with db_session() as session:
+            obj = session.execute(query)
+            obj.init_env(env, session)
+            obj.change(**kwargs)
+            try:
+                session.commit()
+            except SQLAlchemyError as e:
+                raise e
+            return obj
+            
+    @classmethod
+    def read(cls, filters, page=1, page_size=1, order='id', order_dir='asc'):
+        pass
+        
+    @classmethod
+    def browse(cls, filters, order='id', order_dir='asc'):
+        order_col = getattr(cls, order)
+        query = cls._query_read(cls, filters).order_by(order_col)
+        with db_session() as session:
+            rows = session.execute(query).scalars().all()
+        return rows
+    
+    @classmethod
+    def get(cls, field, param, options=None):
+        query = cls._query_get_single(cls, field, param, options)
+        with db_session() as session:
+            obj = session.execute(query).scalars().one()
+        return obj
+        
+    def _query_read(self, filters):
+        query = select(self)
+        for filter_spec in filters:
+            filter_objs = build_filters(filter_spec)
+            sqlalchemy_filters = [
+                filter_item.format_for_sqlalchemy(self) for filter_item in filter_objs
+            ]
+            query = query.filter(*sqlalchemy_filters)
+        return query
+        
+    def _query_get_single(self, field, param, options=None):
+        column = getattr(self, field)
+        return select(self).filter(column == param)
+    
+    def on_create(self, **kwargs):
+        self._write_relationship(**kwargs)
+        
+    def after_create(self, **kwargs):
+        pass
+        
+    def change(self, **kwargs):
+        pass
+    
+    def _write_relationship(self, **kwargs):
+        relationships = self._get_member()[1]          
+        for key, val in kwargs.items():
+            if key in relationships:
+                relate = relationships[key]
+                if relate.direction == ONETOMANY:
+                    for item in val:
+                        if 'id' in item.keys():
+                            relate.mapper.entity.write(self.env, 'id', '1', **item)
+                        else:
+                            d = relate.mapper.entity.create(self.env, **item)
+                            p = getattr(self, key)
+                            p.append(d)
+                # elif relate.direction == MANYTOMANY:
+                #     pass
+                
+    def _set_id(self):
+        seq = Sequence(self.__tablename__ + '_id_seq')
+        self.id = self.session.execute(seq)
+        
+    def _get_member(self):
+        ins = inspect(self)
+        columns = set(ins.mapper.column_attrs.keys())
+        relationships = set(ins.mapper.relationships.keys())
+        return (columns, relationships)
+    
+    def init_env(self, env, session):
+        self.env = env
+        self.session = session
+        
 
+class ModelMixin:
+    id = Column(Integer, primary_key=True)
+    
 # Base Model
-Base = declarative_base(cls=JsonSerializableBase)  #, constructor=JsonSerializableBase._constructor)
+Base = declarative_base(cls=JsonSerializableBase, constructor=JsonSerializableBase._constructor)
+
+
+    
+        
+    
+    
+    
+    

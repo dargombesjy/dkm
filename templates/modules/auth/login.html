@@ -1,0 +1,32 @@
+<%inherit file="../base.html" />
+
+<%block name="content">
+
+  <div class="box-centered">
+    <form class="form form-login" role="form" method="post" action="/auth/login">
+      <h2 class="text-center">Login</h2>
+      <input type="hidden" name="csrf_token" value="b24c847b66ccc7948df626714b7882e4c785dcefo1623490032" />
+      <div class="input-wrapper">
+        <input type="email" placeholder="Email" name="login" id="login" required="required" autofocus="autofocus"
+          autocapitalize="off" class="bordered"/>
+      </div>
+      <div class="input-wrapper">
+        <input type="password" placeholder="Password" name="password" id="password" required="required"
+          autocomplete="current-password" maxlength="4096" class="bordered"/>
+      </div>
+      <div class="clearfix oe_login_buttons text-center mb-1 pt-3">
+        <button type="submit" class="btn btn-primary btn-block">Log in</button>
+        <div class="justify-content-between mt-2 d-flex small">
+        </div>
+        <div class="o_login_auth"></div>
+      </div>
+      % if 'messages' in data:
+      	% for message in data['messages']:
+      		<p class="message-error">${message}</p>
+      	% endfor
+      % endif
+      <input type="hidden" name="redirect" />
+    </form>
+  </div>
+
+</%block>

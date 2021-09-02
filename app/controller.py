@@ -7,11 +7,14 @@ Created on Aug 28, 2021
 import json
 import decimal
 import datetime
-from pathlib import Path
+import pkgutil
+from werkzeug.utils import import_string
+from werkzeug.wrappers import Response
 from mako.lookup import TemplateLookup
-from werkzeug.wrappers import Response, response
-from werkzeug.utils import redirect
-from mypy.dmypy.client import request
+from .session import FilesystemSessionStore
+from .config import config
+
+session_store = FilesystemSessionStore()
 
 
 class DynamicJSONEncoder(json.JSONEncoder):
@@ -47,6 +50,13 @@ class BaseController(object):
     template_lookup = TemplateLookup([
             'templates', 'templates/modules',])
     json_encoder = DynamicJSONEncoder
+    
+    def __init__(self):
+        '''
+        Constructor
+        '''
+        env = self._load_packages(config['config']['module_path'], 'modules', None)
+        self.env = env
 
     def html_response(self, template_uri, data=None):
         template = self.template_lookup.get_template(template_uri)
@@ -58,36 +68,51 @@ class BaseController(object):
             json.dumps(data, cls=self.json_encoder),
             mimetype='application/json'
         )
+    
+    def _load_packages(self, path, basename, append=None):
+        packages = dict()   
+        if isinstance(path, str):
+            path = path.split(',')
+        # if basename is None:
+        #     basename = self._module_basename
+        for _importer, modname, ispkg in pkgutil.iter_modules(path):
+            if ispkg:
+                import_name = basename + '.' + modname
+                module = import_string(import_name)
+                packages[modname] = module
+        return packages
+    
 
 class Controller(BaseController):
     '''
     classdocs
     '''
-
-    def __init__(self):
-        '''
-        Constructor
-        '''
-    
+        
     def home(self, request):
         return self.html_response('/home.html', {
             'title': 'Home'})
         
     def auth(self, request):
-        pass
+        auth = self.env['auth'].controller.AuthController()
+        return auth.run(request)
     
     def web(self, request):
         data = {
             'title': 'Course'}
+        rows = self.create(request)
         return self.html_response('/app.html', data)
     
     def api(self, request):
         pass
     
-    def init_app(self, app):
-        self.app = app
+    def create(self, request):
+        model = self.env['auth'].models.AuthUser
+        res = model.create(self.env, **{})
+        return res
     
-    def __call__(self, request, endpoint):
+    def run(self, request, endpoint):
         method_ = getattr(self, endpoint)
         response = method_(request)
         return response
+    
+    
