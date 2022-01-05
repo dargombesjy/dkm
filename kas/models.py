@@ -7,7 +7,7 @@ Created on Aug 30, 2021
 import enum
 import datetime
 from sqlalchemy import Column, String, Integer, ForeignKey, Enum, Date, Float
-from app.db import Base, ModelMixin
+from app.db import Base
 
 
 class KasEnum(enum.Enum):
@@ -15,14 +15,14 @@ class KasEnum(enum.Enum):
     pembangunan = 'Kas Pembangunan'
 
 
-class KasLedger(ModelMixin,Base):
+class KasLedger(Base):
     __tablename__ = 'kas_ledger'
     
     name = Column(String)
     code = Column(String)
     
 
-class KasJournal(ModelMixin, Base):
+class KasJournal(Base):
     __tablename__ = 'kas_journal'
     
     name = Column(String)
